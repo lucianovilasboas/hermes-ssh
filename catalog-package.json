@@ -1,6 +1,6 @@
 {
   "name": "hermes-ssh",
-  "version": "0.3.3.post1",
+  "version": "0.3.3.post2",
   "description": "Manage SSH connections and remote workspaces in Hermes Desktop.",
   "updater": "ssh",
   "companions": []

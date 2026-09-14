@@ -202,11 +202,10 @@ and move its folder out of the Desktop plugin directory; Hermes intentionally
 does not overwrite manual installations. Keep plugin settings when migrating.
 
 After catalog admission, use `hermes plugins update hermes-ssh` and rescan
-Desktop plugins to adopt a reviewed update. The packaged copy's update and restore
-actions cannot replace its files from GitHub releases. Standalone signed updates
+Desktop plugins to adopt a reviewed update. The packaged copy has no in-app update or restore controls. Its release downloader, signature verifier, backup/restore updater, and code-replacement helpers are removed at build time. Standalone signed updates
 continue to use the existing root files.
 
 For development, edit the root files, then run `python scripts/build_catalog.py`.
 Commit the resulting `catalog/` files. CI runs `python scripts/build_catalog.py --check`
 to keep the package current, including any companion files. Catalog packaging
-releases use `catalog-v0.3.3-1` and are not marked as the latest standalone release.
+releases use `catalog-v0.3.3-2` and are not marked as the latest standalone release.

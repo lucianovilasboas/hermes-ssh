@@ -4,151 +4,6 @@ import { jsx, jsxs } from "react/jsx-runtime";
 
 const ID = "hermes-ssh";
 const VERSION = "0.3.3";
-// Public verification key only. The release signing key never ships to users.
-const UPDATE_KEY = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEdDcg2pf4qQg4y89ZLfoIhfJqyKP+bJMA0Q0YVDK0VAbAgyVi5CaodDuUgibOqTx1zQg9xrXdzYbCvpgMjIFBCw==";
-const UPDATE_REPO = "Adolanium/hermes-ssh";
-const UPDATE_LIMIT = 500_000;
-const updateState = sdk.atom({ busy: false, message: "", error: "", backup: null, available: null, restoreAvailable: null });
-const UPDATE_LOCK = Symbol.for("hermes-ssh.update-lock");
-
-function updatePatch(value) {
-  if (!disposed) updateState.set({ ...updateState.get(), ...value });
-}
-function versionParts(version) {
-  if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version))
-    throw new Error("The release has an invalid version.");
-  const parts = version.split(".").map(Number);
-  if (!parts.every(Number.isSafeInteger)) throw new Error("Invalid release version.");
-  return parts;
-}
-function newerVersion(next, current) {
-  const a = versionParts(next), b = versionParts(current);
-  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] > b[i];
-  return false;
-}
-function decode64(value) {
-  if (typeof value !== "string" || value.length > 12_000)
-    throw new Error("Invalid update signature.");
-  return Uint8Array.from(atob(value), (c) => c.charCodeAt(0));
-}
-async function digest(text) {
-  return Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text))),
-    (b) => b.toString(16).padStart(2, "0")).join("");
-}
-async function verifyRelease(release) {
-  if (release.draft || release.prerelease) throw new Error("This is not a stable release.");
-  const match = String(release.body || "").match(/```hermes-ssh-update\s*\n([\s\S]*?)\n```/);
-  if (!match) throw new Error("This release has no signed update. The installed version is unchanged.");
-  const envelope = JSON.parse(match[1]);
-  const payload = decode64(envelope.payload);
-  const key = await crypto.subtle.importKey("spki", decode64(UPDATE_KEY),
-    { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
-  if (!await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, key,
-    decode64(envelope.signature), payload))
-    throw new Error("The update signature is invalid. Nothing was installed.");
-  const info = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(payload));
-  versionParts(info.version);
-  if (info.schema !== 1 || info.plugin !== ID || release.tag_name !== `v${info.version}` ||
-      !/^[a-f0-9]{40}$/.test(info.commit) || !/^[a-f0-9]{64}$/.test(info.sha256) ||
-      !Number.isInteger(info.bytes) || info.bytes < 1 || info.bytes > UPDATE_LIMIT)
-    throw new Error("The signed release metadata is invalid.");
-  return info;
-}
-async function fetchUpdateText(url, limit) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30_000);
-  try {
-    const response = await fetch(url, { signal: controller.signal, credentials: "omit",
-      referrerPolicy: "no-referrer", cache: "no-store", redirect: "error" });
-    if (response.status === 404) {
-      const error = new Error("The release file is unavailable on GitHub. Try again later.");
-      error.status = 404;
-      throw error;
-    }
-    if (response.status === 403 || response.status === 429)
-      throw new Error("GitHub is limiting update checks. Try again later.");
-    if (!response.ok) throw new Error(`Update download failed (${response.status}). Try again later.`);
-    if (Number(response.headers.get("content-length")) > limit || !response.body)
-      throw new Error("The update download is too large or empty.");
-    const reader = response.body.getReader();
-    const chunks = [];
-    let length = 0;
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      length += value.length;
-      if (length > limit) { await reader.cancel(); throw new Error("The update download is too large."); }
-      chunks.push(value);
-    }
-    const bytes = new Uint8Array(length);
-    let offset = 0;
-    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
-    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  } catch (error) {
-    if (error.name === "AbortError") throw new Error("Update check timed out. Try again.");
-    throw error;
-  } finally { clearTimeout(timeout); }
-}
-function updateDesktop() {
-  const desktop = globalThis.window?.hermesDesktop;
-  if (!desktop?.desktopPluginsRoot || !desktop?.readFileText || !desktop?.writeTextFile || !desktop?.renamePath)
-    throw new Error("Open this plugin in Hermes Desktop to update it. This Desktop must support local plugin files.");
-  return desktop;
-}
-async function readUpdateFile(desktop, path) {
-  const result = await desktop.readFileText(path);
-  if (result.truncated || typeof result.text !== "string" || new TextEncoder().encode(result.text).length > UPDATE_LIMIT)
-    throw new Error("The plugin file could not be read completely.");
-  return result.text;
-}
-async function updateLocation(desktop) {
-  const root = await desktop.desktopPluginsRoot();
-  if (typeof root !== "string" || !root.trim()) throw new Error("Desktop's local plugin folder is unavailable.");
-  return root.replace(/[\\/]+$/, "") + "/" + ID;
-}
-function backupKey(dir) { return "updater:backup:" + dir; }
-function validBackup(record) {
-  return record && /^plugin\.backup-[a-f0-9-]{36}\.js$/.test(record.name) && /^[a-f0-9]{64}$/.test(record.sha256);
-}
-async function loadUpdateBackup() {
-  try {
-    const dir = await updateLocation(updateDesktop());
-    const record = await context?.storage.get(backupKey(dir), null);
-    updatePatch({ backup: validBackup(record) ? record : null });
-  } catch { /* SSH remains usable on Desktop versions without updater APIs. */ }
-}
-// Only Electron-local filesystem APIs are used here, never shell.exec or an SSH profile.
-// Stage and verify first. Renaming preserves the old file if the final step fails.
-async function replacePlugin(desktop, dir, before, next, storage) {
-  const file = dir + "/plugin.js";
-  const stage = "plugin.staged-" + crypto.randomUUID() + ".js";
-  const backup = { name: "plugin.backup-" + crypto.randomUUID() + ".js", sha256: await digest(before) };
-  await desktop.writeTextFile(dir + "/" + stage, next);
-  if (await readUpdateFile(desktop, dir + "/" + stage) !== next)
-    throw new Error("The staged update could not be verified. The installed version is unchanged.");
-  if (disposed || state.get().busy || state.get().panel || await updateLocation(desktop) !== dir || await readUpdateFile(desktop, file) !== before)
-    throw new Error("The Desktop profile or installed plugin changed. Reload Desktop and check again.");
-  const previousRecord = await storage.get(backupKey(dir), null);
-  let moved = false;
-  try {
-    await storage.set(backupKey(dir), backup);
-    await desktop.renamePath(file, backup.name);
-    moved = true;
-    await desktop.renamePath(dir + "/" + stage, "plugin.js");
-  } catch (error) {
-    try { if (moved) await desktop.renamePath(dir + "/" + backup.name, "plugin.js"); }
-    catch { throw new Error(`Update failed. Restore ${backup.name} to plugin.js in ${dir}, then reload Desktop.`); }
-    await storage.set(backupKey(dir), previousRecord);
-    throw new Error("Update failed. The previous plugin was restored. " + error.message);
-  }
-  return backup;
-}
-function dismissUpdate() {
-  if (!updateState.get().busy) updatePatch({ available: null, restoreAvailable: null, message: "", error: "" });
-}
-async function runUpdate() {
-  updatePatch({ busy: false, available: null, restoreAvailable: null, error: '', message: "This package uses Hermes updates. Run hermes plugins update hermes-ssh, then rescan Desktop plugins." });
-}
 const ROUTE = "/ssh-connections";
 const host = sdk.host;
 const state = sdk.atom({
@@ -1313,65 +1168,8 @@ function Page() {
             children:
               "Requires SSH access and Bash on the remote machine. Browsers and other integrations keep their current location.",
           }),
-          jsx(UpdateControls, { disabled: !!s.busy || s.panel }),
+          null,
         ],
-      }),
-    ],
-  });
-}
-
-function UpdateControls({ disabled = false }) {
-  const update = sdk.useValue(updateState);
-  return jsxs("section", {
-    className: "hssh-updates",
-    "aria-label": "Plugin updates",
-    children: [
-      jsxs("div", {
-        className: "hssh-update-row",
-        children: [
-          jsxs("div", {
-            children: [
-              jsx("strong", { children: `Hermes SSH v${VERSION}` }),
-              jsx("p", { children: disabled ? "Finish machine setup before updating." : "Check for a new version. You choose when to install it." }),
-            ],
-          }),
-          jsx(Button, {
-            icon: "refresh", disabled: disabled || update.busy,
-            onClick: () => runUpdate(),
-            children: update.busy ? "Please wait…" : "Check for updates",
-          }),
-        ],
-      }),
-      (update.message || update.error) && jsx("p", {
-        className: `hssh-update-status${update.error ? " error" : ""}`,
-        role: update.error ? "alert" : "status",
-        children: update.error || update.message,
-      }),
-      update.available && jsxs("div", {
-        className: "hssh-key-actions",
-        role: "group",
-        "aria-label": `Install Hermes SSH v${update.available.version}?`,
-        children: [
-          jsx(Button, { variant: "primary", disabled: disabled || update.busy,
-            onClick: () => runUpdate("install"), children: "Update now" }),
-          jsx(Button, { variant: "quiet", disabled: update.busy,
-            onClick: dismissUpdate, children: "Later" }),
-        ],
-      }),
-      update.restoreAvailable && jsxs("div", {
-        className: "hssh-key-actions",
-        role: "group",
-        "aria-label": "Confirm restore",
-        children: [
-          jsx(Button, { variant: "primary", disabled: disabled || update.busy,
-            onClick: () => runUpdate("restore-confirm"), children: "Restore now" }),
-          jsx(Button, { variant: "quiet", disabled: update.busy,
-            onClick: dismissUpdate, children: "Cancel" }),
-        ],
-      }),
-      update.backup && !update.restoreAvailable && jsx(Button, {
-        variant: "quiet", disabled: disabled || update.busy,
-        onClick: () => runUpdate("restore"), children: "Restore previous version",
       }),
     ],
   });
@@ -1384,7 +1182,6 @@ export default {
   register(ctx) {
     context = ctx;
     disposed = false;
-    loadUpdateBackup();
     platformPromise = null;
     const profile = host.state.profile?.get() || "default";
     const connection = host.state.connectionId?.get();
@@ -1452,15 +1249,6 @@ export default {
 };
 export const __test = {
   VERSION,
-  UPDATE_KEY,
-  updateState,
-  newerVersion,
-  verifyRelease,
-  fetchUpdateText,
-  replacePlugin,
-  runUpdate,
-  dismissUpdate,
-  UpdateControls,
   quote,
   validateMachine,
   testConnection,
