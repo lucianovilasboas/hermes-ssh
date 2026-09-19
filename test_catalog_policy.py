@@ -21,6 +21,12 @@ class CatalogPolicyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             strip_updater("export default {};", config["updater"])
 
+    def test_import_from_ssh_config_feature_is_packaged(self):
+        source = (ROOT / "catalog/desktop/plugin.js").read_text(encoding="utf-8")
+        for symbol in ("parseSshConfig", "resolveHomePath", "readSshConfig", 'operation === "import-config"', "Import from ~/.ssh/config"):
+            with self.subTest(symbol=symbol):
+                self.assertIn(symbol, source)
+
 
 if __name__ == "__main__":
     unittest.main()

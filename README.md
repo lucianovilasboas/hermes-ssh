@@ -27,7 +27,7 @@ The agent uses its normal terminal and file tools. You don't have to ask it to t
 | Set up | Work |
 | --- | --- |
 | **Save a machine.** Keep its address, username, port, key path, and remote folder together. | **Connect in one step.** Choose Connect or type `/ssh my-pi` in Desktop. |
-| **Bring a key or create one.** Use an existing private key, an unlocked SSH agent, or generate a dedicated Ed25519 key. | **Use ordinary prompts.** Ask Hermes to inspect a project, run tests, or edit files on that machine. |
+| **Import existing hosts.** Pull every machine from your `~/.ssh/config` in one click. | **Bring a key or create one.** Use an existing private key, an unlocked SSH agent, or generate a dedicated Ed25519 key. |
 | **Check access first.** Test SSH authentication, Bash, and the selected folder. | **Keep tasks separate.** Each connection opens a fresh Hermes profile and task. Existing tasks keep their original target. |
 
 ## One file to install
@@ -131,6 +131,22 @@ Next time:
 `/ssh` opens Connections. An unknown machine name opens setup with that name filled in. These are Desktop commands, intercepted before the message reaches the model.
 
 The agent process stays on the originating Hermes host. Its terminal and environment-backed file operations use the remote machine. Browsers and other integrations retain their existing location. You don't need Hermes installed on the target.
+
+## Import machines from `~/.ssh/config`
+
+If you already manage hosts with OpenSSH, import them instead of typing them one by one. Choose **Import from `~/.ssh/config`** on the Connections page (or the same link when the list is empty). The plugin reads the originating host's `~/.ssh/config`, and for every concrete `Host` entry creates a saved machine using its `HostName`, `User`, `Port`, and first `IdentityFile`. Machines already present by name are skipped.
+
+What the importer reads and skips:
+
+| Source | Result |
+| --- | --- |
+| `Host server` with `HostName`/`User`/`Port`/`IdentityFile` | One machine named `server`, ready to review and connect. |
+| `Host *` or patterns with `*`, `?`, `[` `]` | Skipped — they are not a concrete machine. |
+| An entry whose machine name already exists | Skipped, so re-importing never duplicates. |
+| `IdentityFile ~/.ssh/id_ed25519_x` | Stored as an absolute key path (resolves `~` to the account home). |
+| An entry without `IdentityFile` | Imported with no key, so SSH falls back to your config/agent. |
+
+Imported machines are not connected automatically; review each one (trust + test) before first use, exactly as with a manually added machine. The importer reads the file on the originating Hermes host, never the remote target.
 
 ## Authentication and data
 
