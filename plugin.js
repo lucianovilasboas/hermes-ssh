@@ -338,6 +338,95 @@ function validateMachine(m) {
     throw new Error("Use an absolute private-key path on the Hermes host.");
   return record;
 }
+// ---- Import hosts from ~/.ssh/config ---------------------------------------
+// Pure parser. Accepts the default OpenSSH config format: a sequence of Host
+// stanzas with indented directives. Continuation lines (trailing backslash),
+// comments, `Host *` and wildcard patterns are handled. Returns import drafts
+// that still need validation + id assignment by the caller.
+function parseSshConfig(text) {
+  const drafts = [];
+  const blocks = [];
+  let current = null;
+  const lines = String(text || "").split(/\r?\n/);
+  let carry = null;
+  for (const raw of lines) {
+    let line = raw.replace(/\s+$/, "");
+    if (carry !== null) {
+      line = (carry + line).trim();
+      carry = null;
+    }
+    if (/\\$/.test(line)) {
+      carry = line.replace(/\\$/, "");
+      continue;
+    }
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const first = trimmed.split(/\s+/, 1)[0].toLowerCase();
+    if (first === "host") {
+      current = { patterns: trimmed.slice(4).trim().split(/\s+/) };
+      blocks.push(current);
+      continue;
+    }
+    if (!current) continue; // directive outside a Host stanza
+    const body = trimmed.slice(first.length).trim();
+    switch (first) {
+      case "hostname":
+        current.hostname = body;
+        break;
+      case "user":
+        current.user = body;
+        break;
+      case "port":
+        current.port = body;
+        break;
+      case "identityfile":
+        (current.identity = current.identity || []).push(body);
+        break;
+    }
+  }
+  for (const b of blocks) {
+    for (const pattern of b.patterns) {
+      if (pattern === "*" || /[\*?\[\]]/.test(pattern)) continue; // wildcard/match
+      const draft = {
+        name: pattern,
+        host: b.hostname || pattern,
+        user: b.user || "",
+        port: b.port || "22",
+        key: (b.identity || [])[0] || "",
+        cwd: "~",
+        trusted: false,
+        from_config: true,
+      };
+      drafts.push(draft);
+    }
+  }
+  return drafts;
+}
+
+// Expand "~" / "$HOME" in a key path against the remote account's HOME.
+function resolveHomePath(key, home) {
+  const h = String(home || "").replace(/\/+$/, "");
+  if (key === "~") return h;
+  if (key.startsWith("~/")) return h + key.slice(1);
+  if (key.startsWith("$HOME")) return h + key.slice(5);
+  return key;
+}
+
+async function sshConfigPath() {
+  const home = await shell("printf '%s' \"$HOME\"");
+  if (!home) throw new Error("Could not locate the SSH home directory on the Hermes host.");
+  return home;
+}
+
+async function readSshConfig() {
+  const home = await sshConfigPath();
+  const r = await rpc("shell.exec", {
+    command: "cat " + quote(home + "/.ssh/config", false),
+  });
+  if (r.code !== 0) return { home, exists: false, text: "" };
+  return { home, exists: true, text: String(r.stdout || "") };
+}
+
 async function testConnection(m) {
   if (!m.trusted)
     throw new Error(
@@ -379,6 +468,35 @@ async function testConnection(m) {
 async function api(operation, payload = {}) {
   if (operation === "list")
     return { machines: await records(), origin: "the originating Hermes host" };
+  if (operation === "import-config") {
+    const { home, exists, text } = await readSshConfig();
+    if (!exists)
+      return { imported: null, existing: 0, home, message: "No ~/.ssh/config file found on the Hermes host." };
+    const current = await records();
+    const existing = new Set(current.map((m) => m.name.toLowerCase()));
+    let added = 0;
+    let skipped = 0;
+    for (const draft of parseSshConfig(text)) {
+      if (existing.has(draft.name.toLowerCase())) {
+        skipped++;
+        continue;
+      }
+      const key = resolveHomePath(draft.key, home);
+      let clean;
+      try {
+        clean = validateMachine({ ...draft, key });
+      } catch {
+        skipped++;
+        continue;
+      }
+      clean.id = crypto.randomUUID();
+      clean.from_config = true;
+      await replaceMachine(clean, null);
+      existing.add(clean.name.toLowerCase());
+      added++;
+    }
+    return { imported: added, skipped, home, message: null };
+  }
   if (operation === "save") {
     const list = await records(),
       old = list.find((x) => x.id === payload.id);
@@ -515,6 +633,24 @@ async function refresh() {
     if (version === routeVersion) patch({ ...data, loading: false, error: "" });
   } catch (e) {
     if (version === routeVersion) patch({ loading: false, error: e.message });
+  }
+}
+async function importFromConfig() {
+  if (state.get().busy) return;
+  patch({ busy: "config-import", error: "", notice: "Importing machines from ~/.ssh/config…" });
+  try {
+    const r = await api("import-config");
+    if (r.imported === null)
+      patch({ busy: "", notice: r.message });
+    else
+      patch({
+        busy: "",
+        notice: `Imported ${r.imported} machine${r.imported === 1 ? "" : "s"} from ~/.ssh/config` +
+          (r.skipped ? ` (${r.skipped} skipped)` : ""),
+      });
+    await refresh();
+  } catch (e) {
+    patch({ busy: "", error: e.message, notice: "" });
   }
 }
 function openPanel(machine = null) {
@@ -705,7 +841,7 @@ function Notice({ error, children, dismiss }) {
     ],
   });
 }
-function Empty({ onAdd }) {
+function Empty({ onAdd, onImport }) {
   return jsx("div", {
     className: "hssh-empty",
     children: jsxs("div", {
@@ -722,6 +858,16 @@ function Empty({ onAdd }) {
           onClick: onAdd,
           children: "Add your first machine",
         }),
+        onImport &&
+          jsx("div", {
+            className: "hssh-key-actions",
+            children: jsx("button", {
+              type: "button",
+              className: "hssh-inline-link",
+              onClick: onImport,
+              children: "Import machines from ~/.ssh/config",
+            }),
+          }),
       ],
     }),
   });
@@ -1292,6 +1438,12 @@ function Page() {
                 disabled: !!s.busy,
                 children: "Add machine",
               }),
+              jsx(Button, {
+                icon: "arrow",
+                onClick: importFromConfig,
+                disabled: !!s.busy,
+                children: s.busy === "config-import" ? "Importing…" : "Import from ~/.ssh/config",
+              }),
             ],
           }),
           jsx("div", {
@@ -1348,7 +1500,7 @@ function Page() {
                         ? s.machines.map((machine) =>
                             jsx(Machine, { machine, busy: s.busy }, machine.id),
                           )
-                        : jsx(Empty, { onAdd: () => openPanel() }),
+                        : jsx(Empty, { onAdd: () => openPanel(), onImport: importFromConfig }),
                     ],
                   }),
                   s.panel &&
@@ -1535,10 +1687,13 @@ export const __test = {
   UpdateControls,
   quote,
   validateMachine,
+  parseSshConfig,
+  resolveHomePath,
   testConnection,
   middleware,
   connect,
   api,
+  importFromConfig,
   CSS,
   Page,
   Setup,
